@@ -131,8 +131,8 @@ static locale_t utf_locale;
 static void on_load(void) __attribute__((constructor));
 static void on_unload(void) __attribute__((destructor));
 
-static int mt_safe_on_load();
-static void mt_safe_on_unload();
+static int mt_safe_on_load(void);
+static void mt_safe_on_unload(void);
 
 
 #ifdef HAVE_EXECVE
@@ -188,14 +188,14 @@ static void on_unload(void) {
     pthread_mutex_unlock(&mutex);
 }
 
-static int mt_safe_on_load() {
+static int mt_safe_on_load(void) {
 #ifdef HAVE_NSGETENVIRON
     environ = *_NSGetEnviron();
     if (0 == environ)
         return 0;
 #endif
     // Create locale to encode UTF-8 characters
-    utf_locale = newlocale(LC_ALL_MASK, "en_US.UTF-8", (locale_t)0);
+    utf_locale = newlocale(LC_CTYPE_MASK, "", (locale_t)0);
     if ((locale_t)0 == utf_locale) {
         PERROR("newlocale");
         return 0;
@@ -207,7 +207,7 @@ static int mt_safe_on_load() {
     return 1;
 }
 
-static void mt_safe_on_unload() {
+static void mt_safe_on_unload(void) {
     freelocale(utf_locale);
     release_env_t(&initial_env);
 }
