@@ -122,42 +122,60 @@ CompilationCommand = collections.namedtuple(
     'CompilationCommand', ['compiler', 'phase', 'flags', 'files', 'output'])
 
 
-def command_entry_point(function):
-    """ Decorator for command entry methods.
+def shell_split(string):
+    # type: (str) -> List[str]
+    """ Takes a command string and returns as a list. """
 
-    The decorator initialize/shutdown logging and guard on programming
-    errors (catch exceptions).
+    def unescape(arg):
+        # type: (str) -> str
+        """ Gets rid of the escaping characters. """
 
-    The decorated method can have arbitrary parameters, the return value will
-    be the exit code of the process. """
+        if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] == '"':
+            return re.sub(r'\\(["\\])', r'\1', arg[1:-1])
+        return re.sub(r'\\([\\ $%&\(\)\[\]\{\}\*|<>@?!])', r'\1', arg)
 
-    @functools.wraps(function)
-    def wrapper(*args, **kwargs):
-        """ Do housekeeping tasks and execute the wrapped method. """
+    return [unescape(token) for token in shlex.split(string)]
 
-        try:
-            logging.basicConfig(format='%(name)s: %(message)s',
-                                level=logging.WARNING,
-                                stream=sys.stdout)
-            # this hack to get the executable name as %(name)
-            logging.getLogger().name = os.path.basename(sys.argv[0])
-            return function(*args, **kwargs)
-        except KeyboardInterrupt:
-            logging.warning('Keyboard interrupt')
-            return 130  # signal received exit code for bash
-        except Exception:
-            logging.exception('Internal error.')
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.error("Please report this bug and attach the output "
-                              "to the bug report")
-            else:
-                logging.error("Please run this command again and turn on "
-                              "verbose mode (add '-vvvv' as argument).")
-            return 64  # some non used exit code for internal errors
-        finally:
-            logging.shutdown()
 
-    return wrapper
+def run_build(command, *args, **kwargs):
+    # type: (...) -> int
+    """ Run and report build command execution
+
+    :param command: list of tokens
+    :return: exit code of the process
+    """
+    environment = kwargs.get('env', os.environ)
+    logging.debug('run build %s, in environment: %s', command, environment)
+    exit_code = subprocess.call(command, *args, **kwargs)
+    logging.debug('build finished with exit code: %d', exit_code)
+    return exit_code
+
+
+def run_command(command, cwd=None):
+    # type: (List[str], str) -> List[str]
+    """ Run a given command and report the execution.
+
+    :param command: array of tokens
+    :param cwd: the working directory where the command will be executed
+    :return: output of the command
+    """
+    def decode_when_needed(result):
+        # type: (Any) -> str
+        """ check_output returns bytes or string depend on python version """
+        if not isinstance(result, str):
+            return result.decode('utf-8')
+        return result
+
+    try:
+        directory = os.path.abspath(cwd) if cwd else os.getcwd()
+        logging.debug('exec command %s in %s', command, directory)
+        output = subprocess.check_output(command,
+                                         cwd=directory,
+                                         stderr=subprocess.STDOUT)
+        return decode_when_needed(output).splitlines()
+    except subprocess.CalledProcessError as ex:
+        ex.output = decode_when_needed(ex.output).splitlines()
+        raise ex
 
 
 def reconfigure_logging(verbose_level):
@@ -184,8 +202,48 @@ def reconfigure_logging(verbose_level):
     root.handlers = [handler]
 
 
+def command_entry_point(function):
+    # type: (Callable[[], int]) -> Callable[[], int]
+    """ Decorator for command entry methods.
+
+    The decorator initialize/shutdown logging and guard on programming
+    errors (catch exceptions).
+
+    The decorated method can have arbitrary parameters, the return value will
+    be the exit code of the process. """
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        """ Do housekeeping tasks and execute the wrapped method. """
+
+        try:
+            logging.basicConfig(format='%(name)s: %(message)s',
+                                level=logging.WARNING,
+                                stream=sys.stdout)
+            # this hack to get the executable name as %(name)
+            logging.getLogger().name = os.path.basename(sys.argv[0])
+            return function(*args, **kwargs)
+        except KeyboardInterrupt:
+            logging.warning('Keyboard interrupt')
+            return 130  # signal received exit code for bash
+        except (OSError, subprocess.CalledProcessError):
+            logging.exception('Internal error.')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.error("Please report this bug and attach the output "
+                              "to the bug report")
+            else:
+                logging.error("Please run this command again and turn on "
+                              "verbose mode (add '-vvvv' as argument).")
+            return 64  # some non used exit code for internal errors
+        finally:
+            logging.shutdown()
+
+    return wrapper
+
+
 @command_entry_point
 def intercept_build():
+    # type: () -> int
     """ Entry point for 'intercept-build' command. """
 
     args = parse_args_for_intercept_build()
@@ -204,6 +262,7 @@ def intercept_build():
 
 
 def capture(args):
+    # type: (argparse.Namespace) -> Tuple[int, Iterable[Compilation]]
     """ Implementation of compilation database generation.
 
     :param args:    the parsed and validated command line arguments
@@ -216,13 +275,13 @@ def capture(args):
     exit_code = run_build(args.build, env=environment)
     # read the intercepted exec calls
     calls = (parse_exec_trace(file) for file in exec_trace_files(tmp_dir))
-    current = compilations(calls, args.cc, args.cxx)
-
-    shutil.rmtree( tmp_dir )
+    safe_calls = (x for x in calls if x is not None)
+    current = compilations(safe_calls, args.cc, args.cxx)
 
     return exit_code, iter(set(current))
 
 def compilations(exec_calls, cc, cxx):
+    # type: (Iterable[Execution], str, str) -> Iterable[Compilation]
     """ Needs to filter out commands which are not compiler calls. And those
     compiler calls shall be compilation (not pre-processing or linking) calls.
     Plus needs to find the source file name from the arguments.
@@ -238,6 +297,7 @@ def compilations(exec_calls, cc, cxx):
 
 
 def setup_environment(args, destination):
+    # type: (argparse.Namespace, str) -> Dict[str, str]
     """ Sets up the environment for the build command.
 
     In order to capture the sub-commands (executed by the build process),
@@ -264,6 +324,7 @@ def setup_environment(args, destination):
 
 
 def parse_exec_trace(filename):
+    # type: (str) -> Execution
     """ Parse execution report file.
 
     Given filename points to a file which contains the basic report
@@ -274,8 +335,14 @@ def parse_exec_trace(filename):
 
     logging.debug('parse exec trace file: %s', filename)
     with open(filename, 'r') as handler:
-        entry = json.load(handler)
-        return Execution(pid=entry['pid'], cwd=entry['cwd'], cmd=entry['cmd'])
+        try:
+            entry = json.load(handler)
+            return Execution(pid=entry['pid'],
+                             cwd=entry['cwd'],
+                             cmd=entry['cmd'])
+        except ValueError:
+            logging.warning('parse exec trace file: %s FAILED', filename)
+            return None
 
 
 def exec_trace_files(directory):
@@ -378,17 +445,21 @@ class Compilation:
         self.output = output
 
     def __hash__(self):
+        # type: (Compilation) -> int
         return hash(str(self.as_dict()))
 
     def __eq__(self, other):
+        # type: (Compilation, object) -> bool
         return vars(self) == vars(other)
 
     def as_dict(self):
+        # type: (Compilation) -> Dict[str, str]
         """ This method dumps the object attributes into a dictionary. """
 
         return vars(self)
 
     def as_db_entry(self):
+        # type: (Compilation) -> Dict[str, Any]
         """ This method creates a compilation database entry. """
 
         relative = os.path.relpath(self.source, self.directory)
@@ -403,6 +474,7 @@ class Compilation:
 
     @classmethod
     def from_db_entry(cls, entry):
+        # type: (Type[Compilation], Dict[str, str]) -> Iterable[Compilation]
         """ Parser method for compilation entry.
 
         From compilation database entry it creates the compilation object.
@@ -450,22 +522,26 @@ class Compilation:
                 (compiler_language, rest of the command) otherwise """
 
         def is_wrapper(cmd):
+            # type: (str) -> bool
             return True if COMPILER_PATTERN_WRAPPER.match(cmd) else False
 
         def is_mpi_wrapper(cmd):
+            # type: (str) -> bool
             return True if COMPILER_PATTERNS_MPI_WRAPPER.match(cmd) else False
 
         def is_c_compiler(cmd):
+            # type: (str) -> bool
             return os.path.basename(cc) == cmd or \
                 any(pattern.match(cmd) for pattern in COMPILER_PATTERNS_CC)
 
         def is_cxx_compiler(cmd):
+            # type: (str) -> bool
             return os.path.basename(cxx) == cmd or \
                 any(pattern.match(cmd) for pattern in COMPILER_PATTERNS_CXX)
 
         if command:  # not empty list will allow to index '0' and '1:'
-            executable = os.path.basename(command[0])
-            parameters = command[1:]
+            executable = os.path.basename(command[0])  # type: str
+            parameters = command[1:]  # type: List[str]
             # 'wrapper' 'parameters' and
             # 'wrapper' 'compiler' 'parameters' are valid.
             # Additionally, a wrapper can wrap another wrapper.
@@ -475,7 +551,9 @@ class Compilation:
                 return ('c', parameters) if result is None else result
             # MPI compiler wrappers add extra parameters
             elif is_mpi_wrapper(executable):
-                mpi_call = get_mpi_call(executable)  # type: List[str]
+                # Pass the executable with full path to avoid pick different
+                # executable from PATH.
+                mpi_call = get_mpi_call(command[0])  # type: List[str]
                 return cls._split_compiler(mpi_call + parameters, cc, cxx)
             # and 'compiler' 'parameters' is valid.
             elif is_c_compiler(executable):
@@ -542,6 +620,7 @@ class CompilationDatabase:
 
     @staticmethod
     def save(filename, iterator):
+        # type: (str, Iterable[Compilation]) -> None
         """ Saves compilations to given file.
 
         :param filename: the destination file name
@@ -553,6 +632,7 @@ class CompilationDatabase:
 
     @staticmethod
     def load(filename):
+        # type: (str) -> Iterable[Compilation]
         """ Load compilations from file.
 
         :param filename: the file to read from
@@ -565,6 +645,7 @@ class CompilationDatabase:
 
 
 def classify_source(filename, c_compiler=True):
+    # type: (str, bool) -> str
     """ Classify source file names and returns the presumed language,
     based on the file name extension.
 
@@ -600,6 +681,7 @@ def classify_source(filename, c_compiler=True):
 
 
 def get_mpi_call(wrapper):
+    # type: (str) -> List[str]
     """ Provide information on how the underlying compiler would have been
     invoked without the MPI compiler wrapper. """
 
@@ -612,32 +694,6 @@ def get_mpi_call(wrapper):
             pass
     # Fail loud
     raise RuntimeError("Could not determinate MPI flags.")
-
-
-def shell_split(string):
-    """ Takes a command string and returns as a list. """
-
-    def unescape(arg):
-        """ Gets rid of the escaping characters. """
-
-        if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] == '"':
-            return re.sub(r'\\(["\\])', r'\1', arg[1:-1])
-        return re.sub(r'\\([\\ $%&\(\)\[\]\{\}\*|<>@?!])', r'\1', arg)
-
-    return [unescape(token) for token in shlex.split(string)]
-
-
-def run_build(command, *args, **kwargs):
-    """ Run and report build command execution
-
-    :param command: array of tokens
-    :return: exit code of the process
-    """
-    environment = kwargs.get('env', os.environ)
-    logging.debug('run build %s, in environment: %s', command, environment)
-    exit_code = subprocess.call(command, *args, **kwargs)
-    logging.debug('build finished with exit code: %d', exit_code)
-    return exit_code
 
 
 @contextlib.contextmanager
