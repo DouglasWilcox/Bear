@@ -272,7 +272,11 @@ def capture(args):
 
     # run the build command
     environment = setup_environment(args, tmp_dir)
-    exit_code = run_build(args.build, env=environment)
+    if (args.skip_build):
+        tmp_dir = args.skip_build
+        exit_code = 0
+    else:
+        exit_code = run_build(args.build, env=environment)
     # read the intercepted exec calls
     calls = (parse_exec_trace(file) for file in exec_trace_files(tmp_dir))
     safe_calls = (x for x in calls if x is not None)
@@ -424,6 +428,10 @@ def create_intercept_parser():
         default="@DEFAULT_PRELOAD_FILE@",
         action='store',
         help="""specify libear file location.""")
+    advanced.add_argument(
+        '--skip-build',
+        action='store',
+        help="""skip building, use a previous intercept dir instead.""")
 
     parser.add_argument(
         dest='build', nargs=argparse.REMAINDER, help="""Command to run.""")
