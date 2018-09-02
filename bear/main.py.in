@@ -218,7 +218,9 @@ def capture(args):
     calls = (parse_exec_trace(file) for file in exec_trace_files(tmp_dir))
     current = compilations(calls, args.cc, args.cxx)
 
-    shutil.rmtree( tmp_dir )
+    # not worth deleting the compilation log: too many long running build intercepts lost to one problem or another
+    logging.debug( 'compilation log: %s' % tmp_dir )
+    #shutil.rmtree( tmp_dir )
 
     return exit_code, iter(set(current))
 

@@ -46,6 +46,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <errno.h>
+#include <wchar.h>
 
 #if defined HAVE_XLOCALE_HEADER
 #include <xlocale.h>
@@ -522,10 +523,14 @@ static int write_json_report(int fd, char const *const cmd[], char const *const 
     return 0;
 }
 
-static int encode_json_string(char const *const src, char *const dst, size_t const dst_size) {
-    size_t const wsrc_length = mbstowcs(NULL, src, 0);
+#if 0
+static int encode_json_string(char const *src, char *dst, size_t const dst_size) {
+	mbstate_t ps;
+	memset(&ps,0,sizeof(mbstate_t));
+    size_t const wsrc_length = mbsrtowcs(NULL, &src, 0, &ps);
     wchar_t wsrc[wsrc_length + 1];
-    if (mbstowcs((wchar_t *)&wsrc, src, wsrc_length + 1) != wsrc_length) {
+	memset(&ps,0,sizeof(mbstate_t));
+    if (mbsrtowcs((wchar_t *)&wsrc, &src, wsrc_length + 1, &ps) != wsrc_length) {
         PERROR("mbstowcs");
         return -1;
     }
@@ -578,6 +583,54 @@ static int encode_json_string(char const *const src, char *const dst, size_t con
     }
     return -1;
 }
+#else
+static int encode_json_string(char const *src, char *dst, size_t const dst_size) {
+    char const *src_it = src;
+	size_t const src_length = strlen(src);
+    char const *const src_end = src_it + src_length;
+
+    char *dst_it = dst;
+    char *const dst_end = dst + dst_size;
+
+    for (; src_it != src_end; ++src_it) {
+        if (dst_it >= dst_end) {
+            return -1;
+        }
+        // Insert an escape character before control characters.
+        switch (*src_it) {
+        case '\b':
+            dst_it += snprintf(dst_it, 3, "\\b");
+            break;
+        case '\f':
+            dst_it += snprintf(dst_it, 3, "\\f");
+            break;
+        case '\n':
+            dst_it += snprintf(dst_it, 3, "\\n");
+            break;
+        case '\r':
+            dst_it += snprintf(dst_it, 3, "\\r");
+            break;
+        case '\t':
+            dst_it += snprintf(dst_it, 3, "\\t");
+            break;
+        case '"':
+            dst_it += snprintf(dst_it, 3, "\\\"");
+            break;
+        case '\\':
+            dst_it += snprintf(dst_it, 3, "\\\\");
+            break;
+        default:
+			*dst_it++ = (char)*src_it;
+            break;
+        }
+    }
+    if (dst_it < dst_end) {
+        *dst_it = '\0';
+        return 0;
+    }
+    return -1;
+}
+#endif
 
 /* update environment assure that chilren processes will copy the desired
  * behaviour */
